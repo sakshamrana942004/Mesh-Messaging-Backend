@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
+# ✅ CORS (important)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -11,57 +12,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-connections = []
-
-# -------------------
-# LoRa Setup
-# -------------------
-
-LORA_CONNECTED = False
-
-try:
-    import meshtastic
-    import meshtastic.serial_interface
-    from pubsub import pub
-
-    interface = meshtastic.serial_interface.SerialInterface()
-
-    if interface:
-        LORA_CONNECTED = True
-        print("LoRa device connected")
-
-except Exception as e:
-
-    interface = None
-    print("LoRa not connected:", e)
-
-
-# -------------------
-# Receive LoRa
-# -------------------
-
-if LORA_CONNECTED:
-
-    def onReceive(packet, interface):
-
-        try:
-
-            text = packet["decoded"]["payload"].decode("utf-8")
-
-            import asyncio
-
-            for conn in connections:
-                asyncio.create_task(
-                    conn.send_json({
-                        "type":"lora",
-                        "message":text
-                    })
-                )
-
-        except:
-            pass
-
-    pub.subscribe(onReceive, "meshtastic.receive")
+# ✅ Store users with names
+connections = {}
+user_count = 0
 
 
 # -------------------
@@ -71,32 +24,42 @@ if LORA_CONNECTED:
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
 
+    global user_count
+
     await websocket.accept()
-    connections.append(websocket)
+
+    # assign unique name
+    user_count += 1
+    username = f"Node {user_count}"
+
+    connections[websocket] = username
+
+    # notify join
+    for conn in connections:
+        await conn.send_json({
+            "type": "info",
+            "message": f"{username} joined"
+        })
 
     try:
-
         while True:
 
             data = await websocket.receive_text()
 
-            # broadcast to dashboard
+            # broadcast message with name
             for conn in connections:
-
                 await conn.send_json({
-                    "type":"chat",
-                    "message":data
+                    "type": "chat",
+                    "message": f"{username}: {data}"
                 })
-
-            # send to LoRa only if device connected
-            if LORA_CONNECTED and interface:
-
-                try:
-                    interface.sendText(data)
-                except Exception as e:
-                    print("LoRa send failed:", e)
 
     except WebSocketDisconnect:
 
-        connections.remove(websocket)
-        print("Client disconnected")
+        left_user = connections[websocket]
+        del connections[websocket]
+
+        for conn in connections:
+            await conn.send_json({
+                "type": "info",
+                "message": f"{left_user} left"
+            })
